@@ -1,0 +1,277 @@
+/**
+ * Marketing Website Events — GTM dataLayer (Cinépolis CAM Spec §4).
+ *
+ * Part of movie-browser: reuses window.rpReactPlugin.initialData for cinema/movie
+ * lookups on select_showtime (no duplicate catalog bootstrap).
+ *
+ * Exposes window.mbGtm for the theme reservation UI.
+ */
+(function (window, $) {
+	'use strict';
+
+	var SELECT_SHOWTIME_REDIRECT_DELAY_MS = 500;
+
+	function pushToDataLayer(payload) {
+		if (!payload || typeof payload !== 'object') {
+			return false;
+		}
+
+		window.dataLayer = window.dataLayer || [];
+		window.dataLayer.push(payload);
+
+		return true;
+	}
+
+	function pad2(value) {
+		return String(value).padStart(2, '0');
+	}
+
+	function formatShowDateTime(unixTimestamp) {
+		var ts = parseInt(unixTimestamp, 10);
+
+		if (!ts) {
+			return { show_date: '', show_time: '', show_datetime: '' };
+		}
+
+		var date = new Date(ts * 1000);
+		var show_date = [
+			date.getFullYear(),
+			pad2(date.getMonth() + 1),
+			pad2(date.getDate()),
+		].join('-');
+		var show_time = [pad2(date.getHours()), pad2(date.getMinutes())].join(':');
+
+		return {
+			show_date: show_date,
+			show_time: show_time,
+			show_datetime: show_date + 'T' + show_time,
+		};
+	}
+
+	function getGtmData() {
+		return typeof mbGtmData !== 'undefined' && mbGtmData ? mbGtmData : {};
+	}
+
+	function getGtmCountry() {
+		return String(getGtmData().country || '').toUpperCase();
+	}
+
+	function getReactInitialData() {
+		if (typeof window.rpReactPlugin === 'undefined' || !window.rpReactPlugin) {
+			return null;
+		}
+
+		return window.rpReactPlugin.initialData || null;
+	}
+
+	function getReactMovies() {
+		var data = getReactInitialData();
+
+		if (!data) {
+			return [];
+		}
+
+		var movies = Array.isArray(data.movies) ? data.movies.slice() : [];
+
+		if (Array.isArray(data.groups)) {
+			data.groups.forEach(function (group) {
+				if (group && Array.isArray(group.movies)) {
+					movies = movies.concat(group.movies);
+				}
+			});
+		}
+
+		if (Array.isArray(data.comingSoonMovies)) {
+			movies = movies.concat(data.comingSoonMovies);
+		}
+
+		return movies;
+	}
+
+	function mapReactMovieToGtm(movie) {
+		if (!movie || typeof movie !== 'object') {
+			return {};
+		}
+
+		var ratingRaw = movie.ratingName || '';
+		var rating = ratingRaw && ratingRaw !== 'GENERAL' ? ratingRaw : '';
+		var cats = Array.isArray(movie.cats) ? movie.cats : [];
+		var formatAttrs =
+			Array.isArray(movie.attrsList) && movie.attrsList.length
+				? movie.attrsList
+				: Array.isArray(movie.attrs)
+					? movie.attrs
+					: [];
+
+		var language = '';
+		var attrsUpper = formatAttrs.map(function (attr) {
+			return String(attr).toUpperCase();
+		});
+
+		if (
+			String(movie.isDubbed) === '1' ||
+			attrsUpper.indexOf('DOB') !== -1 ||
+			attrsUpper.indexOf('DUB') !== -1
+		) {
+			language = 'DOB';
+		} else if (String(movie.isSubtitled) === '1') {
+			language = 'SUB';
+		}
+
+		return {
+			movie_id: movie.emid != null && movie.emid !== '' ? String(movie.emid) : '',
+			movie_name: movie.webName ? String(movie.webName) : '',
+			movie_distributor: movie.code ? String(movie.code) : '',
+			movie_genre: cats.length ? cats.join(', ') : '',
+			movie_rating: rating || 'N/A',
+			movie_language: language,
+			movie_format: formatAttrs.length ? formatAttrs.join(' ') : '2D',
+			movie_duration: movie.length ? parseInt(movie.length, 10) : 0,
+		};
+	}
+
+	function mapReactSiteToGtm(site) {
+		if (!site || typeof site !== 'object') {
+			return {};
+		}
+
+		return {
+			cinema_id: site.id != null && site.id !== '' ? String(site.id) : '',
+			cinema_name: site.name ? String(site.name) : '',
+			city: site.city ? String(site.city) : '',
+			country: getGtmCountry(),
+			room: '',
+		};
+	}
+
+	function getMovieParams(movieCode) {
+		var code = movieCode ? String(movieCode) : '';
+
+		if (code) {
+			var match = getReactMovies().find(function (movie) {
+				return String(movie.code || '') === code;
+			});
+
+			if (match) {
+				return mapReactMovieToGtm(match);
+			}
+		}
+
+		return getGtmData().movie || {};
+	}
+
+	function getCinemaParams(siteId) {
+		var key = siteId != null && siteId !== '' ? String(siteId) : '';
+		var data = getReactInitialData();
+		var sites = data && Array.isArray(data.sites) ? data.sites : [];
+
+		if (key) {
+			var match = sites.find(function (site) {
+				return String(site.id) === key;
+			});
+
+			if (match) {
+				return mapReactSiteToGtm(match);
+			}
+		}
+
+		var realSites = sites.filter(function (site) {
+			return Number(site.id) > 0;
+		});
+
+		if (realSites.length === 1) {
+			return mapReactSiteToGtm(realSites[0]);
+		}
+
+		return {};
+	}
+
+	function pushPageEvent() {
+		var ctx = getGtmData();
+
+		if (!ctx.pageEvent) {
+			return;
+		}
+
+		pushToDataLayer(ctx.pageEvent);
+	}
+
+	/**
+	 * Spec §4.2 — push select_showtime from a projection radio (jQuery or Element).
+	 *
+	 * @param {JQuery|Element} projection
+	 * @returns {boolean}
+	 */
+	function pushSelectShowtimeFromProjection(projection) {
+		var $selected = projection && projection.jquery ? projection : $(projection);
+
+		if (!$selected || !$selected.length) {
+			return false;
+		}
+
+		var movieCode =
+			$selected.attr('data-movie-code') ||
+			(getGtmData().movie && getGtmData().movie.movie_distributor) ||
+			'';
+		var siteId =
+			$selected.data('site') || $('input[name="field-reservation-site"]').val();
+		var room = $selected.attr('data-room') || '';
+		var format = $selected.attr('data-format') || '';
+
+		var show_date = $selected.attr('data-show-date') || '';
+		var show_time = $selected.attr('data-show-time') || '';
+		var show_datetime = $selected.attr('data-show-datetime') || '';
+
+		if (!show_date || !show_time) {
+			var fallback = formatShowDateTime($selected.attr('data-dt'));
+			show_date = show_date || fallback.show_date;
+			show_time = show_time || fallback.show_time;
+			show_datetime = show_datetime || fallback.show_datetime;
+		} else if (!show_datetime) {
+			show_datetime = show_date + 'T' + show_time;
+		}
+
+		var movie = getMovieParams(movieCode);
+		var cinema = getCinemaParams(siteId);
+
+		// Prefer showtime attrs (data-format) for DOB/DUB language detection.
+		var movieLanguage = movie.movie_language || '';
+		var formatUpper = String(format || '')
+			.toUpperCase()
+			.split(/[\s,]+/)
+			.filter(Boolean);
+
+		if (formatUpper.indexOf('DOB') !== -1 || formatUpper.indexOf('DUB') !== -1) {
+			movieLanguage = 'DOB';
+		}
+
+		return pushToDataLayer({
+			event: 'select_showtime',
+			movie_id: movie.movie_id || '',
+			movie_name: movie.movie_name || '',
+			movie_distributor: '', // sensitive data, do not send
+			cinema_id: cinema.cinema_id || '',
+			cinema_name: cinema.cinema_name || '',
+			city: cinema.city || '',
+			country: getGtmCountry(),
+			room: room || cinema.room || '',
+			show_date: show_date,
+			show_time: show_time,
+			show_datetime: show_datetime,
+			movie_language: movieLanguage,
+			movie_format: format || movie.movie_format || '2D',
+		});
+	}
+
+	window.mbGtm = {
+		pushToDataLayer: pushToDataLayer,
+		pushPageEvent: pushPageEvent,
+		pushSelectShowtimeFromProjection: pushSelectShowtimeFromProjection,
+		selectShowtimeRedirectDelayMs: SELECT_SHOWTIME_REDIRECT_DELAY_MS,
+	};
+
+	// Spec §4.1 Movie Detail View
+	$(function () {
+		pushPageEvent();
+	});
+})(window, jQuery);
